@@ -488,27 +488,16 @@ fun ProfileScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             OutlinedButton(
-                onClick = { showRegisterDialog = true },
+                onClick = { viewModel.logout() },
                 modifier = Modifier
-                    .weight(1f)
-                    .testTag("open_register_dialog"),
-                shape = RoundedCornerShape(12.dp)
+                    .fillMaxWidth()
+                    .testTag("logout_profile_btn"),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
             ) {
-                Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Registrar")
-            }
-
-            OutlinedButton(
-                onClick = { showLoginDialog = true },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("open_login_dialog"),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Iniciar sesión")
+                Text("Cerrar Sesión (Cambiar de cuenta)")
             }
         }
 

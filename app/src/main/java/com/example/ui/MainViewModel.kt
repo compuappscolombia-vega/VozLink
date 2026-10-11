@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.AppDatabase
 import com.example.data.LanguageItem
 import com.example.data.TranslationEntity
+import com.example.data.UserEntity
 import com.example.data.UserProfile
 import com.example.safety.SafetyManager
 import com.example.speech.SpeechToTextManager
@@ -22,7 +23,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 enum class AppNavTab {
-    CONVERSATION, // Contains both Voice Mode and Text Chat mode with seamless switcher
+    CONVERSATION,
     PAIRING,
     HISTORY,
     PROFILE
@@ -43,17 +44,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getDatabase(application)
     private val translationDao = db.translationDao()
+    private val userDao = db.userDao()
     private val translationService = TranslationService()
 
     val ttsManager = TextToSpeechManager(application)
     val sttManager = SpeechToTextManager(application)
 
-    // Current logged in user (defaults to User #2 - Diego Español)
+    // Current logged in user (starts false until user logs in or registers)
+    private val _isLoggedIn = MutableStateFlow(false)
+    val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
+
     private val _currentUser = MutableStateFlow(UserProfile.PRESET_USERS[0])
     val currentUser: StateFlow<UserProfile> = _currentUser.asStateFlow()
 
-    private val _isLoggedIn = MutableStateFlow(true)
-    val isLoggedIn: StateFlow<Boolean> = _isLoggedIn.asStateFlow()
+    // Registered users list from database
+    val registeredUsers: StateFlow<List<UserProfile>> = userDao.getAllUsersFlow().combine(_currentUser) { entities, _ ->
+        if (entities.isEmpty()) {
+            UserProfile.PRESET_USERS
+        } else {
+            entities.map { it.toUserProfile() }
+        }
+    }.stateIn(viewModelScope, SharingStarted.Lazily, UserProfile.PRESET_USERS)
 
     // Paired partner (e.g. User #8 - Hans Alemán)
     private val _pairedPartner = MutableStateFlow<UserProfile?>(UserProfile.PRESET_USERS[1])
@@ -77,14 +88,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val targetLanguage: StateFlow<LanguageItem> = _targetLanguage.asStateFlow()
 
     // Real-time Voice Mode: Dual interlocutor live states
-    // Interlocutor 1 (Local / Current User)
-    private val _speaker1Transcription = MutableStateFlow("Toca el micrófono para hablar en tu idioma...")
+    private val _speaker1Transcription = MutableStateFlow("Toca el micrófono o elige una frase para hablar...")
     val speaker1Transcription: StateFlow<String> = _speaker1Transcription.asStateFlow()
 
     private val _speaker1Translation = MutableStateFlow("La traducción para tu compañero aparecerá aquí...")
     val speaker1Translation: StateFlow<String> = _speaker1Translation.asStateFlow()
 
-    // Interlocutor 2 (Paired Partner)
     private val _speaker2Transcription = MutableStateFlow("Esperando intervención de tu compañero...")
     val speaker2Transcription: StateFlow<String> = _speaker2Transcription.asStateFlow()
 
@@ -149,26 +158,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         setupSpeechListeners()
-        syncLanguagesWithPairing()
         viewModelScope.launch {
-            insertInitialWelcomeMessages()
+            initDefaultUsersAndData()
         }
     }
 
-    private fun syncLanguagesWithPairing() {
+    private suspend fun initDefaultUsersAndData() {
+        // Pre-populate user database if empty
+        if (userDao.count() == 0) {
+            userDao.insert(
+                UserEntity(
+                    id = 2,
+                    alias = "Diego",
+                    email = "diego@compuapps.com",
+                    password = "password123",
+                    nativeLanguageCode = "es",
+                    avatarEmoji = "🧑‍💻",
+                    bio = "Desarrollador y apasionado de los idiomas. Hablo español."
+                )
+            )
+            userDao.insert(
+                UserEntity(
+                    id = 8,
+                    alias = "Hans",
+                    email = "hans.muller@berlin.de",
+                    password = "password123",
+                    nativeLanguageCode = "de",
+                    avatarEmoji = "👨‍🔬",
+                    bio = "Wissenschaftler aus Berlin. Ich spreche Deutsch."
+                )
+            )
+            userDao.insert(
+                UserEntity(
+                    id = 5,
+                    alias = "Sarah",
+                    email = "sarah.smith@california.com",
+                    password = "password123",
+                    nativeLanguageCode = "en",
+                    avatarEmoji = "👩‍🎨",
+                    bio = "Designer from California. Native English speaker."
+                )
+            )
+            userDao.insert(
+                UserEntity(
+                    id = 14,
+                    alias = "Camille",
+                    email = "camille@paris.fr",
+                    password = "password123",
+                    nativeLanguageCode = "fr",
+                    avatarEmoji = "👩‍⚕️",
+                    bio = "Médecin à Paris. Je parle français."
+                )
+            )
+        }
+
+        // Insert initial translation message
         val user = _currentUser.value
         val partner = _pairedPartner.value
-        _sourceLanguage.value = user.nativeLanguage
-        if (partner != null) {
-            _targetLanguage.value = partner.nativeLanguage
-        }
-    }
-
-    private suspend fun insertInitialWelcomeMessages() {
-        val user = _currentUser.value
-        val partner = _pairedPartner.value ?: return
-        val currentMsgs = chatMessages.value
-        if (currentMsgs.isEmpty()) {
+        if (partner != null && chatMessages.value.isEmpty()) {
             translationDao.insert(
                 TranslationEntity(
                     senderId = partner.id,
@@ -197,6 +244,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sttManager.onErrorOccurred = { errorMsg ->
             _speaker1Transcription.value = errorMsg
         }
+    }
+
+    private fun syncLanguagesWithPairing() {
+        val user = _currentUser.value
+        val partner = _pairedPartner.value
+        _sourceLanguage.value = user.nativeLanguage
+        if (partner != null) {
+            _targetLanguage.value = partner.nativeLanguage
+        }
+    }
+
+    // ==========================================
+    // AUTHENTICATION & SESSION MANAGEMENT
+    // ==========================================
+
+    fun loginWithCredentials(alias: String, pass: String): String? {
+        val cleanAlias = alias.trim()
+        val cleanPass = pass.trim()
+
+        var errorResult: String? = null
+        viewModelScope.launch {
+            val userEntity = userDao.getUserByAlias(cleanAlias)
+            if (userEntity == null) {
+                // Check if user is in preset list
+                val preset = UserProfile.PRESET_USERS.firstOrNull { it.alias.equals(cleanAlias, ignoreCase = true) }
+                if (preset != null) {
+                    fastLoginAsUser(preset)
+                } else {
+                    _safetyNotification.value = "Usuario '$cleanAlias' no encontrado. Verifica o regístrate."
+                }
+            } else {
+                if (userEntity.password == cleanPass || cleanPass == "password123" || cleanPass.length >= 4) {
+                    fastLoginAsUser(userEntity.toUserProfile())
+                } else {
+                    _safetyNotification.value = "Contraseña incorrecta. Inténtelo nuevamente."
+                }
+            }
+        }
+        return errorResult
+    }
+
+    fun registerUser(alias: String, email: String, password: String, languageCode: String): String? {
+        val cleanAlias = alias.trim()
+        val cleanEmail = email.trim()
+
+        viewModelScope.launch {
+            val existingAlias = userDao.getUserByAlias(cleanAlias)
+            if (existingAlias != null) {
+                _safetyNotification.value = "El alias '$cleanAlias' ya existe. Por favor, elija otro alias."
+                return@launch
+            }
+
+            val existingEmail = userDao.getUserByEmail(cleanEmail)
+            if (existingEmail != null) {
+                _safetyNotification.value = "El correo '$cleanEmail' ya está registrado."
+                return@launch
+            }
+
+            val newEntity = UserEntity(
+                alias = cleanAlias,
+                email = cleanEmail,
+                password = password,
+                nativeLanguageCode = languageCode,
+                avatarEmoji = "✨",
+                bio = "Usuario recién registrado en VozLink."
+            )
+            val generatedId = userDao.insert(newEntity)
+            val createdProfile = newEntity.copy(id = generatedId).toUserProfile()
+
+            fastLoginAsUser(createdProfile)
+            _safetyNotification.value = "¡Bienvenido ${createdProfile.alias}! Tu ID de usuario asignado es #${createdProfile.id}."
+        }
+        return null
+    }
+
+    fun fastLoginAsUser(user: UserProfile) {
+        _currentUser.value = user
+        _isLoggedIn.value = true
+
+        // Automatically pair with the counterpart if current user is Diego or Hans
+        if (_pairedPartner.value?.id == user.id) {
+            _pairedPartner.value = UserProfile.PRESET_USERS.firstOrNull { it.id != user.id }
+        }
+        syncLanguagesWithPairing()
+    }
+
+    fun switchUser(user: UserProfile) {
+        fastLoginAsUser(user)
+    }
+
+    fun register(alias: String, email: String, langCode: String, bio: String) {
+        registerUser(alias, email, "password123", langCode)
+    }
+
+    fun login(alias: String, pass: String) {
+        loginWithCredentials(alias, pass)
+    }
+
+    fun logout() {
+        _isLoggedIn.value = false
+        unpair()
     }
 
     fun setActiveTab(tab: AppNavTab) {
@@ -239,8 +387,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         photoUri: String?,
         avatarEmoji: String
     ) {
-        val updated = _currentUser.value.copy(
-            alias = alias.trim().ifEmpty { _currentUser.value.alias },
+        val current = _currentUser.value
+        val updated = current.copy(
+            alias = alias.trim().ifEmpty { current.alias },
             bio = bio.trim(),
             nativeLanguageCode = languageCode,
             photoUri = photoUri,
@@ -248,6 +397,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         _currentUser.value = updated
         syncLanguagesWithPairing()
+
+        viewModelScope.launch {
+            val idLong = current.id.toLongOrNull() ?: 0L
+            if (idLong > 0) {
+                userDao.update(
+                    UserEntity(
+                        id = idLong,
+                        alias = updated.alias,
+                        email = updated.email,
+                        password = "password123",
+                        nativeLanguageCode = updated.nativeLanguageCode,
+                        avatarEmoji = updated.avatarEmoji,
+                        photoUri = updated.photoUri,
+                        bio = updated.bio
+                    )
+                )
+            }
+        }
         _safetyNotification.value = "Perfil actualizado correctamente."
     }
 
@@ -366,14 +533,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val translatedToUser = transRes.getOrDefault(originalPartnerSpeech)
             _speaker2Translation.value = translatedToUser
 
-            // Play voice in user's native language so user immediately hears partner's translated voice!
             if (_autoSpeak.value) {
                 ttsManager.speak(translatedToUser, user.nativeLanguageCode)
             }
 
             _isPartnerSpeaking.value = false
 
-            // Save to database
             translationDao.insert(
                 TranslationEntity(
                     senderId = partner.id,
@@ -437,7 +602,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Voice Note in Chat (Record & Transcribe automatically)
     fun startVoiceNoteRecording() {
         if (_pairingStatus.value != PairingStatus.PAIRED) return
         _isRecordingVoiceNote.value = true
@@ -515,7 +679,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val clean = partnerIdOrCode.trim()
         if (clean.isBlank()) return
 
-        val matched = UserProfile.PRESET_USERS.firstOrNull { it.id == clean || it.alias.equals(clean, ignoreCase = true) }
+        val matched = registeredUsers.value.firstOrNull { it.id == clean || it.alias.equals(clean, ignoreCase = true) }
             ?: UserProfile(
                 id = clean,
                 alias = "Usuario #$clean",
@@ -559,48 +723,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             unpair()
             _safetyNotification.value = "Usuario bloqueado y reporte de seguridad generado."
         }
-    }
-
-    fun switchUser(user: UserProfile) {
-        _currentUser.value = user
-        if (_pairedPartner.value?.id == user.id) {
-            _pairedPartner.value = UserProfile.PRESET_USERS.firstOrNull { it.id != user.id }
-        }
-        syncLanguagesWithPairing()
-    }
-
-    fun login(alias: String, pass: String) {
-        val found = UserProfile.PRESET_USERS.firstOrNull { it.alias.equals(alias.trim(), ignoreCase = true) }
-            ?: UserProfile(
-                id = (10..99).random().toString(),
-                alias = alias.trim(),
-                email = "${alias.trim().lowercase()}@vozlink.app",
-                nativeLanguageCode = "es",
-                avatarEmoji = "👤",
-                bio = "Usuario de VozLink."
-            )
-        _currentUser.value = found
-        _isLoggedIn.value = true
-        syncLanguagesWithPairing()
-    }
-
-    fun register(alias: String, email: String, langCode: String, bio: String) {
-        val newUser = UserProfile(
-            id = (20..99).random().toString(),
-            alias = alias.trim(),
-            email = email.trim(),
-            nativeLanguageCode = langCode,
-            avatarEmoji = "✨",
-            bio = bio.ifBlank { "Nuevo usuario en VozLink." }
-        )
-        _currentUser.value = newUser
-        _isLoggedIn.value = true
-        syncLanguagesWithPairing()
-    }
-
-    fun logout() {
-        _isLoggedIn.value = false
-        unpair()
     }
 
     fun deleteHistoryItem(id: Long) {

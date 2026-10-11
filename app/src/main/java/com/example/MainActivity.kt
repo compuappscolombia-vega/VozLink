@@ -58,6 +58,7 @@ import com.example.ui.AppNavTab
 import com.example.ui.MainViewModel
 import com.example.ui.PairingStatus
 import com.example.ui.components.UserAvatar
+import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.ConversationScreen
 import com.example.ui.screens.HistoryScreen
 import com.example.ui.screens.PairingScreen
@@ -74,7 +75,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MyApplicationTheme {
-                MainAppScreen(viewModel = viewModel)
+                val isLoggedIn by viewModel.isLoggedIn.collectAsState()
+                if (!isLoggedIn) {
+                    AuthScreen(viewModel = viewModel)
+                } else {
+                    MainAppScreen(viewModel = viewModel)
+                }
             }
         }
     }
