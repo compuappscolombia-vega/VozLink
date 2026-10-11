@@ -1,0 +1,6 @@
+{
+  "name": "VozLink",
+  "description": "Traductor de voz y chat en tiempo real para usuarios emparejados con transcripción automática, síntesis de voz e historial persistente.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
